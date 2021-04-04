@@ -11,7 +11,7 @@ from selenium.webdriver.support.ui import Select
 import timeit
 
 
-def delco_scraper_full(street_name, start_date = (date.today() - datetime.timedelta(days=365)) , end_date = date.today()):
+def delco_scraper_full(street_name, start_date=(date.today() - datetime.timedelta(days=365)), end_date=date.today()):
     """
     Use the advanced search function of the http://delcorealestate.co.delaware.pa.us/ with the below inputs:
 
@@ -67,35 +67,35 @@ def delco_scraper_full(street_name, start_date = (date.today() - datetime.timede
     print('Searching http://delcorealestate.co.delaware.pa.us/ for streets starting with {street_name}...'.format(
         street_name=street_name))
 
-    start = timeit.default_timer()
+    # Find print preview and change to print preview window
+    driver.find_element_by_id('Span1').click()
+    child = driver.window_handles[-1]
+    driver.switch_to.window(child)
 
-    # Select results from first page
+    # Get row count of table, specify where data starts
+    search_results = driver.find_elements_by_class_name('SearchResults')
+    rows = len(search_results)
+    row_start = 5
+
+    # Save results from print window to list
+    results = []
+    for j in range(row_start, row_start+rows):
+        inner_result = []
+        for i in range(1, 8):
+            xpath = '/html/body/form/table/tbody/tr/td/center/table/tbody/tr[{row_number}]/td[{column_number}]'.format(
+                row_number=j, column_number=i)
+            xpath_text = driver.find_element_by_xpath(xpath).text
+            inner_result.append(xpath_text)
+        results.append(inner_result)
+        print('Finished row {row_number} of {total_rows}'.format(
+            row_number=(j-row_start+1), total_rows=rows))
+
+    # Send results to .csv
     list_to_csv('{street}.csv'.format(street=street_name),
-                fields, scrape_delco_table(driver))
-
-    #print(driver.page_source)
-    # Check the last IndexLink element, if it matches Next >>
-    # then click to the next page and run the above functions until no pages are left
-    while driver.find_elements_by_class_name('IndexLink')[-1].text == 'Next >>':
-        try:
-            next_button = driver.find_elements_by_class_name('IndexLink')[-1]
-            next_button.click()
-            list_to_csv('results_1.csv', fields, scrape_delco_table(driver))
-            a = pd.read_csv('{street}.csv'.format(street=street_name))
-            b = pd.read_csv('results_1.csv')
-            merged = pd.concat([a, b])
-            merged.to_csv('{street}.csv'.format(
-                street=street_name), index=False)
-        except:
-            break
-    index = merged.index
-    number_of_rows = len(index)
-    stop = timeit.default_timer()
-    runtime = stop - start
-    print('Found {rows} entries for streets starting with {street_name} in {runtime} seconds'.format(
-        rows=number_of_rows, street_name=street_name, runtime=runtime))
+                fields, results)
 
     driver.quit()
+
 
 if __name__ == "__main__":
     delco_scraper_full()
