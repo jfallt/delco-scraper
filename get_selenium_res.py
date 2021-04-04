@@ -10,7 +10,6 @@ def get_selenium_res():
     # Create random user agent
     ua = UserAgent()
     user_agent = ua.random
-    print(user_agent)
 
     # Select options for selenium
     options = Options()
