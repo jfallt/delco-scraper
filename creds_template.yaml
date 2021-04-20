@@ -1,0 +1,11 @@
+# Input postgres connection info for database setup and subsquent sql queries
+# Rename file to creds.yaml
+# Include in gitignore
+user:
+  postgres
+password:
+  password
+host:
+  localhost
+database:
+  delco_real_estate_sales
