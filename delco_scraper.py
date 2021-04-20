@@ -1,4 +1,4 @@
-from web_scraping.scraper import sales_history_by_date_range, sales_history_by_year_batch
+from scraper import sales_history_by_date_range, sales_history_by_year_batch, parcel_details
 
 print("""
      _      _                                                    
@@ -10,14 +10,30 @@ print("""
                                                 | |              
                                                 |_|           v1.0                                                  
 """)
-print('Hello! Welcome to the delco scraper!')
-response = input('Please enter a command!')
-if response == 'history':
-    street = input('Please enter a street name: ')
-    sales_history_by_date_range(street)
-elif response == 'batch':
-    start = input('Starting Year: ')
-    end = input('Ending Year: ')
-    sales_history_by_year_batch(start, end)
-elif response == 'parcel update':
-    print('placeholder')
+print('Hello, welcome to the delco scraper CLI!')
+
+while True:
+    response = input('Please enter a command! (-h for help)\n')
+    if response == '-a':
+        street = input('Please enter a street name: ')
+        sales_history_by_date_range(street)
+        break
+    elif response == '-b':
+        start = input('Starting Year (YYYY): ')
+        end = input('Ending Year (YYYY): ')
+        sales_history_by_year_batch(start, end)
+        break
+    elif response == '-p':
+        parcel_details()
+        break
+    elif response == '-h':
+        print("""
+        Input Commands List
+        ----------------------------------------------------------------------------------------
+        -b for sales data web scrape between two years
+        -p manual parcel updates (this should run automatically after each web scrape)
+        -a basic sales scrape for the past year with street input (do not input street numbers)
+        ----------------------------------------------------------------------------------------
+        """)
+    else:
+      print('Please enter a valid command!')
