@@ -343,15 +343,17 @@ def parcel_details(parcel_id):
 
 def get_all_missing_parcel_detail():
     parcel_ids = get_parcels_without_details()
+
+    # Creating a multiprocess since we can only access details for one parcel at a time
+    # TODO add a yaml config so the user can specify the number of pools depending on their specs
     q = Queue()
     p = Pool(10) 
     results = p.imap(parcel_details, parcel_ids)
-    
-    # In case a child process fails this loop tracks those and retries them
     successful = []
     failure_tracker = []
     retry_results = []
 
+    # In case a child process fails this loop tracks those and retries them
     # TODO add logging for parcel errrors
     while len(successful) < len(parcel_ids):
         successful.extend([r for r in results if not r is None])
@@ -363,17 +365,6 @@ def get_all_missing_parcel_detail():
             failure_tracker.append(failed_items)
             retry_results = p.imap(parcel_details, parcel_ids);
 
-    # while loop was implemented when building the parcel_details function, might be unncessary now
-    #while len(parcel_ids) > 0:
-    #    try:
-    #        p.imap(parcel_details, parcel_ids)
-            #[(parcel_details(parcel)) for parcel in parcel_ids]
-    #    except:
-    #        print('Error in parcel details scrape\nRetrying...')
-            # If the results error out we need to rerun the above process
-    #        parcel_ids = get_parcels_without_details()
-    #        p.terminate()
-    #        p = Pool(10)
     p.close()
     p.join()
     p.terminate()
