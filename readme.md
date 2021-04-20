@@ -85,14 +85,13 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-[![Product Name Screen Shot][product-screenshot]](https://example.com)
+
 
 
 ### Built With
 
-* []()
-* []()
-* []()
+* Python[]()
+* Postgresql[]()
 
 
 
@@ -101,23 +100,15 @@
 
 To get a local copy up and running follow these simple steps.
 
-### Prerequisites
-
-This is an example of how to list things you need to use the software and how to install them.
-* npm
-  ```sh
-  npm install npm@latest -g
-  ```
-
 ### Installation
 
 1. Clone the repo
    ```sh
    git clone https://github.com/jfallt/delco-scraper.git
    ```
-2. Install NPM packages
+2. Install pip packages (create a venv or conda env first)
    ```sh
-   npm install
+   pip install -r requirements.txt
    ```
 
 
@@ -147,15 +138,15 @@ Project Link: [https://github.com/jfallt/delco-scraper](https://github.com/jfall
 
 <!-- MARKDOWN LINKS & IMAGES -->
 <!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
-[contributors-shield]: https://img.shields.io/github/contributors/jfallt/repo.svg?style=for-the-badge
-[contributors-url]: https://github.com/jfallt/repo/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/jfallt/repo.svg?style=for-the-badge
-[forks-url]: https://github.com/jfallt/repo/network/members
-[stars-shield]: https://img.shields.io/github/stars/jfallt/repo.svg?style=for-the-badge
-[stars-url]: https://github.com/jfallt/repo/stargazers
-[issues-shield]: https://img.shields.io/github/issues/jfallt/repo.svg?style=for-the-badge
-[issues-url]: https://github.com/jfallt/repo/issues
-[license-shield]: https://img.shields.io/github/license/jfallt/repo.svg?style=for-the-badge
-[license-url]: https://github.com/jfallt/repo/blob/master/LICENSE.txt
+[contributors-shield]: https://img.shields.io/github/contributors/jfallt/delco-scraper.svg?style=for-the-badge
+[contributors-url]: https://github.com/jfallt/delco-scraper/graphs/contributors
+[forks-shield]: https://img.shields.io/github/forks/jfallt/delco-scraper.svg?style=for-the-badge
+[forks-url]: https://github.com/jfallt/delco-scraper/network/members
+[stars-shield]: https://img.shields.io/github/stars/jfallt/delco-scraper.svg?style=for-the-badge
+[stars-url]: https://github.com/jfallt/delco-scraper/stargazers
+[issues-shield]: https://img.shields.io/github/issues/jfallt/delco-scraper.svg?style=for-the-badge
+[issues-url]: https://github.com/jfallt/delco-scraper/issues
+[license-shield]: https://img.shields.io/github/license/jfallt/delco-scraper.svg?style=for-the-badge
+[license-url]: https://github.com/jfallt/delco-scraper/blob/master/LICENSE.txt
 [linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
 [linkedin-url]: https://linkedin.com/in/jfallt
