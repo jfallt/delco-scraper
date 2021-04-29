@@ -3,15 +3,19 @@ from database_setup import create_connection
 from datetime import date
 import datetime
 from fake_useragent import UserAgent
-from functools import wraps
+from functools import wraps, partial
 import glob
+import json
 from multiprocessing import Pool, Queue
 import os
 import psycopg2
+from queries import insert_residential_details
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import NoSuchElementException
-from selenium.webdriver.support.ui import Select
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import Select, WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from string import ascii_lowercase
 import sys
 import timeit
@@ -19,6 +23,7 @@ import timeit
 
 class CustomError(Exception):
     pass
+
 
 def list_to_csv(file_name, fields, values):
     """
@@ -53,22 +58,16 @@ def get_selenium_res():
     return webdriver.Chrome(options=options, executable_path=DRIVER_PATH)
 
 
-def db_upload(upload_type):
-    if upload_type == 'sales_history':
-        populate_queries = ['call sp_populate_dim_parcel();', 'call sp_populate_fact_sales();',
-                            'call sp_populate_sales_upload_amount_errors();']
-        truncate = 'TRUNCATE TABLE sales_upload'
-        table = 'sales_upload'
-    elif upload_type == 'residential_details':
-        populate_queries = ['call sp_populate_fact_parcel_details();']
-        truncate = 'TRUNCATE TABLE stg_parcel_details'
-        table = 'stg_parcel_details'
+def bulk_csv_upload(upload_type):
+    populate_queries = ['call sp_populate_dim_parcel();', 'call sp_populate_fact_sales();',
+                        'call sp_populate_sales_upload_amount_errors();']
+    truncate = 'TRUNCATE TABLE sales_upload'
+    table = 'sales_upload'
 
     # Get file from data folder
-    
     path = './data'
     extension = 'csv'
-    file = os.path.join(path,'{}.{}'.format(upload_type, extension))
+    file = os.path.join(path, '{}.{}'.format(upload_type, extension))
 
     conn = create_connection()
     cur = conn.cursor()
@@ -84,9 +83,7 @@ def db_upload(upload_type):
 
     [cur.execute(query) for query in populate_queries]
     conn.commit()
-
     cur.close()
-    #print('Uploaded to database!\n')
 
 
 def sales_history_by_date_range(street_name, start_date=(date.today() - datetime.timedelta(days=365)), end_date=date.today()):
@@ -119,18 +116,11 @@ def sales_history_by_date_range(street_name, start_date=(date.today() - datetime
     url_home = 'http://delcorealestate.co.delaware.pa.us'
     url_search = 'http://delcorealestate.co.delaware.pa.us/pt/search/advancedsearch.aspx?mode=advanced'
 
-    # Navigate to search page
+    # Navigate to search page, click agree on disclaimer page
     driver = get_selenium_res()
     driver.get(url_home)
     driver.get(url_search)
-
-    # Trying to go to the url_search page results in a disclaimer page, click agree
     driver.find_element_by_id('btAgree').click()
-
-    # Select results size
-    #driver.find_element_by_id('selPageSize')
-    #result_size = Select(driver.find_element_by_id('selPageSize'))
-    #result_size.select_by_visible_text('50')
 
     # Select search by street name, input parameters
     street_selection = Select(driver.find_element_by_id('sCriteria'))
@@ -147,8 +137,6 @@ def sales_history_by_date_range(street_name, start_date=(date.today() - datetime
     driver.find_element_by_id('ctl01_cal2_dateInput').send_keys(
         end_date.strftime(date_format))
     driver.find_element_by_id('btAdd').click()
-
-    # Submit selections
     driver.find_element_by_id('btSearch').click()
     print('Searching http://delcorealestate.co.delaware.pa.us/ for streets starting with {street_name}...'.format(
         street_name=street_name))
@@ -185,12 +173,12 @@ def sales_history_by_date_range(street_name, start_date=(date.today() - datetime
 
     driver.quit()
 
-    # Send results to .csv
+    # Send results to .csv and upload to database
     list_to_csv(os.path.join('.', 'data', 'sales_history.csv'),
                 fields, data[4:])
     print('Writing results to csv\n')
 
-    db_upload('sales_upload')
+    bulk_csv_upload('sales_upload')
 
 
 def sales_history_by_year_batch(year_start: int, year_end: int):
@@ -211,7 +199,7 @@ def sales_history_by_year_batch(year_start: int, year_end: int):
             try:
                 sales_history_by_date_range(
                     letter, '{year}-01-01'.format(year=i), '{year}-12-31'.format(year=i))
-                db_upload()
+                bulk_csv_upload()
             # Occasionally no results will be found (streets starting with X are often a culprit)
             except:
                 print('No results for streets starting with ' + letter+'\n')
@@ -224,25 +212,28 @@ def sales_history_by_year_batch(year_start: int, year_end: int):
         runtime=runtime))
 
 
-def get_parcels_without_details():
+def get_parcels_without_detail_data(detail_table):
     """
     Query database and find all parcels without detail entries
+
+    Args:
+        detail table: input table name
     """
     query = (
         """
         SELECT P.PARCEL_ID
         FROM DIM_PARCEL P
-        LEFT JOIN FACT_PARCEL_DETAILS FPD ON FPD.ID = P.ID
+        LEFT JOIN {table} FPD ON FPD.ID = P.ID
         GROUP BY P.PARCEL_ID
         HAVING COUNT(FPD.ID) = 0
         ORDER BY P.PARCEL_ID DESC
-        """)
+        """.format(table=detail_table))
     conn = None
     try:
         conn = create_connection()
         cur = conn.cursor()
         cur.execute(query)
-        records =  [r[0] for r in cur.fetchall()]
+        records = [r[0] for r in cur.fetchall()]
         cur.close()
         return records
     except (Exception, psycopg2.DatabaseError) as error:
@@ -252,109 +243,268 @@ def get_parcels_without_details():
             conn.close()
 
 
-def parcel_details(parcel_id):
+def datalet_table_scrape(driver, parcel_id):
+    """
+    Scrape datalet table. The "headers" are on the side of the data and the function
+    takes headers and stitches it together in dictionary for upload
+
+    Args:
+        driver: selenium driver
+        parcel_id: current parcel searched
+    """
+    # Find all datalet headers and data elements
+    data_headers = driver.find_elements_by_class_name('DataletSideHeading')
+    data = driver.find_elements_by_class_name('DataletData')
+
+    # Initialize empty list to store results and add data
+    data_list = []
+    data_headers_list = []
+    [data_list.append(entry.text) for entry in data]
+    [data_headers_list.append(entry.text) for entry in data_headers]
+
+    # Combine lists (this is necessary so we can drop empty header entries)
+    zipped_list = zip(data_headers_list, data_list)
+    data_dict = dict(zipped_list)
+    data_dict['parcel_id'] = parcel_id
+    return data_dict
+
+
+def residential_details_upload(data_dict, exclude):
+    """
+    Upload residential details to database
+    """
+    # Not every entry has residential detail data if it does not insert dummy data into the database to stop from searching again
+    if (not data_dict) or list(data_dict.keys())[0] != exclude:
+        conn = create_connection()
+        cur = conn.cursor()
+        truncate = 'TRUNCATE TABLE stg_parcel_residential_details'
+        cur.execute(truncate)
+        insert = """INSERT INTO stg_parcel_residential_details 
+                (parcel_id) 
+                VALUES ('{parcel_id}')""".format(parcel_id=data_dict['parcel_id'])
+        cur.execute(insert)
+        populate_queries = [
+            'call sp_populate_dim_parcel_residential_details();']
+        [cur.execute(query) for query in populate_queries]
+        conn.commit()
+        print('No data available for parcel ' + data_dict['parcel_id'])
+    else:
+        try:
+            conn = create_connection()
+            cur = conn.cursor()
+            truncate = 'TRUNCATE TABLE stg_parcel_residential_details'
+            cur.execute(truncate)
+            insert = insert_residential_details.format(
+                parcel_id=data_dict['parcel_id'],
+                card=data_dict['Card'],
+                class_input=data_dict['Class'],
+                grade=data_dict['Grade'],
+                cdu=data_dict['CDU'],
+                style=data_dict['Style'],
+                acres=data_dict['Acres'],
+                year_built_effective_year=data_dict['Year Built / Effective Year'],
+                remodeled_year=data_dict['Remodeled Year'],
+                base_area=data_dict['Base Area'],
+                finished_bsmt_area=data_dict['Finished Bsmt Area'],
+                number_of_stories=data_dict['Number of Stories'],
+                exterior_wall=data_dict['Exterior Wall'],
+                basement=data_dict['Basement'],
+                physical_condition=data_dict['Physical Condition'],
+                heating=data_dict['Heating'],
+                heat_fuel_type=data_dict['Heating Fuel Type'],
+                heating_system=data_dict['Heating System'],
+                attic_code=data_dict['Attic Code'],
+                fireplaces=data_dict['Fireplaces: 1 Story/2 Story'],
+                parking=data_dict['Parking'],
+                total_rooms=data_dict['Total Rooms'],
+                full_baths=data_dict['Full Baths'],
+                half_baths=data_dict['Half Baths'],
+                total_fixtures=data_dict['Total Fixtures'],
+                additional_fixtures=data_dict['Additional Fixtures'],
+                bed_rooms=data_dict['Bed Rooms'],
+                family_room=data_dict['Family Room'],
+                living_units=data_dict['Living Units']
+            )
+            cur.execute(insert)
+            populate_queries = [
+                'call sp_populate_dim_parcel_residential_details();']
+            [cur.execute(query) for query in populate_queries]
+            conn.commit()
+        except (Exception, psycopg2.DatabaseError) as error:
+            print(error)
+
+
+def search_by_parcel_id(parcel_id):
     """
     Use the parcel id to search parcel details on http://delcorealestate.co.delaware.pa.us/
     """
-    def parcel_table_scrape(parcel_id):
-        # Find all datalet headers and data elements
-        data_headers = driver.find_elements_by_class_name('DataletSideHeading')
-        data = driver.find_elements_by_class_name('DataletData')
-
-        # Initialize empty list to store results
-        data_list = []
-        data_headers_list = []
-
-        # Add data to list
-        [data_list.append(entry.text) for entry in data]
-        [data_headers_list.append(entry.text) for entry in data_headers]
-
-        # Combine lists (this is necessary so we can drop empty header entries)
-        zipped_list = zip(data_headers_list, data_list)
-        output_list = list(zipped_list)
-
-        exclude = 'Total OBY Value'
-
-        if (not output_list or output_list[0][0] == exclude):
-            # We have to insert null values into the database for the parcel so we don't check for it again
-            # if it's missing residential data
-            # TODO clean this up so it makes more sense
-            print(parcel_id)
-            conn = create_connection()
-            cur = conn.cursor()
-            truncate = 'TRUNCATE TABLE stg_parcel_details'
-            cur.execute(truncate)
-            insert = """INSERT INTO stg_parcel_details 
-                    (parcel_id) 
-                    VALUES ('{parcel_id}')""".format(parcel_id=parcel_id)
-            cur.execute(insert) 
-            populate_queries = ['call sp_populate_fact_parcel_details();']
-            [cur.execute(query) for query in populate_queries]
-            conn.commit()
-            
-            print('No data available for parcel ' + parcel_id)
-        else:
-            # Initialize lists to store results for .csv writer
-            fields = ['parcel_id']
-            values = [parcel_id]
-
-            # Remove blank entries
-            [fields.append(entry[0])
-            for entry in output_list if not entry[0] == ' ' if not entry[0] == exclude]
-            [values.append(entry[1])
-            for entry in output_list if not entry[0] == ' ' if not entry[0] == exclude]
-            
-            # Save to csv and upload to database
-            list_to_csv(os.path.join('.', 'data', 'residential_details.csv'),
-                        fields, [values])
-            db_upload('residential_details')
-
     print('Searching for parcel {parcel_id} details...'.format(
         parcel_id=parcel_id))
 
-    # Required urls
+    # Required urls and xpaths
     url_home = 'http://delcorealestate.co.delaware.pa.us'
     url_search = 'http://delcorealestate.co.delaware.pa.us/pt/search/commonsearch.aspx?mode=parid'
+    search_results_xpath = '//*[@id="searchResults"]/tbody/tr[3]'
 
-    # Navigate to search page
+    # Navigate to search page, this results in a disclaimer page, click agree, then submit parcel id
     driver = get_selenium_res()
     driver.get(url_home)
     driver.get(url_search)
-
-    # Trying to go to the url_search page results in a disclaimer page, click agree
     driver.find_element_by_id('btAgree').click()
-
-    # Submit parcel id
     driver.find_element_by_id('inpParid').send_keys(parcel_id)
     driver.find_element_by_id('btSearch').click()
 
-    # Scrape site information data
-    #site_info = parcel_table_scrape(parcel_id)
-    #print(site_info)
+    # Occasionally the parcel id will return multiple results, the characteristics are the same so grab only the first
+    try:
+        driver.find_element_by_xpath(search_results_xpath).click()
+        print('Multiple parcel id results found, navigating to first entry')
+    except:
+        print('Single parcel id returned for ' + parcel_id)
+    return driver
 
-    # TODO scrape owner history data
+
+def get_parcel_residential_details(parcel_id):
+    """
+    Scrape residential details from the results of the parcel id search
+    """
+    driver = search_by_parcel_id(parcel_id)
+    residential_xpath = '//*[@id="sidemenu"]/li[2]/a/span'
 
     # Navigate to residential tab, scrape data, and upload
     # Finding the element by xpath is necessary here since the links do not have explicit names
-    driver.find_element_by_xpath('//*[@id="sidemenu"]/li[2]/a/span').click()
-    residential_info = parcel_table_scrape(parcel_id)
-    driver.quit()
-    print('{parcel_id} Complete!'.format(parcel_id=parcel_id))
+    try:
+        # The website performance can vary, waiting until the link for res details is clickable
+        WebDriverWait(driver, 60).until(EC.element_to_be_clickable(
+            (By.XPATH, residential_xpath))).click()
+        data_dict = datalet_table_scrape(driver, parcel_id)
+        residential_details_upload(data_dict, 'Total OBY Value')
+        driver.quit()
+        print('{parcel_id} Complete!'.format(parcel_id=parcel_id))
+    except:
+        print('Website not loading parcel {parcel_id}'.format(
+            parcel_id=parcel_id))
 
-def get_all_missing_parcel_detail():
-    parcel_ids = get_parcels_without_details()
 
+def parcel_site_information_scraper(parcel_id):
+    """
+    Scrape parcel site information from the results of the parcel id search
+    """
+    driver = search_by_parcel_id(parcel_id)
+
+    # Scrape data from parcel table
+    data = driver.find_elements_by_id('Parcel')
+    data_list = []
+    [data_list.append(entry.text) for entry in data]
+
+    # There is inconsistency between the headers, most have semi-colons, this makes them consistent
+    processed_list = data_list[0].replace('School District', 'School District:').replace('Homestead %', 'Homestead %:').replace(
+        'Homestead Approved Year', 'Homestead Approved Year:').replace('\n', ':').split(':')
+    stripped_list = [s.strip() for s in processed_list]
+
+    # Specify field list to group values, handling for blank Datalet headers
+    parcel_detail_fields = [
+        'Site Location',
+        'Legal Description',
+        'Map Number',
+        'Municipality',
+        'School District',
+        'Property Type',
+        'Homestead Status - Next School Bill Cycle',
+        'Homestead Status - Current School Bill Cycle',
+        'Homestead %',
+        'Homestead Approved Year',
+        'Additional Info',
+        "Veteran's Exemption"
+    ]
+    parcel_detail_data = {}
+
+    # Parse the response using the field list to identify headers from values
+    j = 0
+    for i in range(len(parcel_detail_fields)-1):
+        while stripped_list[j+1] not in parcel_detail_fields:
+            if parcel_detail_fields[i] not in parcel_detail_data:
+                parcel_detail_data[parcel_detail_fields[i]
+                                   ] = stripped_list[j+1]
+                json_data = json.dumps(parcel_detail_data, indent=2)
+            else:
+                parcel_detail_data[parcel_detail_fields[i]
+                                   ] = parcel_detail_data[parcel_detail_fields[i]] + ' ' + stripped_list[j+1]
+                json_data = json.dumps(parcel_detail_data, indent=2)
+            j += 1
+        i += 1
+        j += 1
+
+
+def residential_details_upload(data_dict, exclude):
+    # Upload to database
+    conn = create_connection()
+    cur = conn.cursor()
+
+    truncate = 'TRUNCATE TABLE stg_parcel_residential_details'
+    cur.execute(truncate)
+
+    # Add to parcel details table
+
+    # Add to sales table
+
+    insert = insert_residential_details.format(
+        parcel_id=data_dict['parcel_id'],
+        card=data_dict['Card'],
+        class_input=data_dict['Class'],
+        grade=data_dict['Grade'],
+        cdu=data_dict['CDU'],
+        style=data_dict['Style'],
+        acres=data_dict['Acres'],
+        year_built_effective_year=data_dict['Year Built / Effective Year'],
+        remodeled_year=data_dict['Remodeled Year'],
+        base_area=data_dict['Base Area'],
+        finished_bsmt_area=data_dict['Finished Bsmt Area'],
+        number_of_stories=data_dict['Number of Stories'],
+        exterior_wall=data_dict['Exterior Wall'],
+        basement=data_dict['Basement'],
+        physical_condition=data_dict['Physical Condition'],
+        heating=data_dict['Heating'],
+        heat_fuel_type=data_dict['Heating Fuel Type'],
+        heating_system=data_dict['Heating System'],
+        attic_code=data_dict['Attic Code'],
+        fireplaces=data_dict['Fireplaces: 1 Story/2 Story'],
+        parking=data_dict['Parking'],
+        total_rooms=data_dict['Total Rooms'],
+        full_baths=data_dict['Full Baths'],
+        half_baths=data_dict['Half Baths'],
+        total_fixtures=data_dict['Total Fixtures'],
+        additional_fixtures=data_dict['Additional Fixtures'],
+        bed_rooms=data_dict['Bed Rooms'],
+        family_room=data_dict['Family Room'],
+        living_units=data_dict['Living Units']
+    )
+    cur.execute(insert)
+    populate_queries = ['call sp_populate_dim_parcel_residential_details();']
+    [cur.execute(query) for query in populate_queries]
+    conn.commit()
+
+
+def parcel_detail_pooling_scraper(table, detail_function):
+    """
+    Find and scrape all missing residential details, creating a multiprocess to do multiple searches at one time
+    """
+    parcel_ids = get_parcels_without_detail_data(
+        table)  # 'dim_parcel_residential_details'
+
+    if len(parcel_ids) == 0:
+        print('All parcel details have been scraped!')
     # Creating a multiprocess since we can only access details for one parcel at a time
     # TODO add a yaml config so the user can specify the number of pools depending on their specs
     q = Queue()
-    p = Pool(10) 
-    results = p.imap(parcel_details, parcel_ids)
+    p = Pool(5)
+    results = p.imap(detail_function, parcel_ids)
     successful = []
     failure_tracker = []
     retry_results = []
 
     # In case a child process fails this loop tracks those and retries them
-    # TODO add logging for parcel errrors
+    # TODO add logging for parcel errors
+    # not sure this is actually doing anything?
     while len(successful) < len(parcel_ids):
         successful.extend([r for r in results if not r is None])
         successful.extend([r for r in retry_results if not r is None])
@@ -363,12 +513,15 @@ def get_all_missing_parcel_detail():
             failed_items.append(q.get())
         if failed_items:
             failure_tracker.append(failed_items)
-            retry_results = p.imap(parcel_details, parcel_ids);
+            retry_results = p.imap(detail_function, parcel_ids)
 
     p.close()
     p.join()
     p.terminate()
 
+
 if __name__ == '__main__':
-    #parcel_details('01000087900')
-    get_all_missing_parcel_detail()
+    # get_parcel_residential_details('36030155001')
+    # parcel_detail_pooling_scraper()
+    parcel_detail_pooling_scraper(
+        'dim_parcel_residential_details', get_parcel_residential_details)
