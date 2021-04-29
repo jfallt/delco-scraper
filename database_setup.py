@@ -3,7 +3,7 @@ from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import yaml
 
 # Read creds
-with open("creds.yaml", 'r') as stream:
+with open('creds.yaml', 'r') as stream:
     data_loaded = yaml.safe_load(stream)
 
 database = data_loaded.get('database')
