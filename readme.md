@@ -110,6 +110,8 @@ To get a local copy up and running follow these simple steps.
    ```sh
    pip install -r requirements.txt
    ```
+3. Change creds_template.yaml to creds.yaml and input database info
+4. Edit config.yaml
 
 
 
