@@ -11,9 +11,11 @@ user = data_loaded.get('user')
 password = data_loaded.get('password')
 host = data_loaded.get('host')
 
+
 def create_connection():
     return psycopg2.connect(
-            user=user, password=password, host=host, database=database)
+        user=user, password=password, host=host, database=database)
+
 
 def execute_multiple_queries(commands):
     conn = None
@@ -29,7 +31,7 @@ def execute_multiple_queries(commands):
     finally:
         if conn is not None:
             conn.close()
-    
+
 
 def create_database():
     con = psycopg2.connect(user=user, password=password, host=host)
@@ -39,10 +41,10 @@ def create_database():
     sqlCreateDatabase = "create database "+name_Database+";"
     cursor.execute(sqlCreateDatabase)
 
+
 def create_tables():
     commands = (
-        """
-        CREATE TABLE sales_upload (
+        """CREATE TABLE sales_upload (
             parcel_id VARCHAR(255) NOT NULL,
             tax_map_id VARCHAR(255) NOT NULL,
             owner_name VARCHAR(255),
@@ -52,20 +54,22 @@ def create_tables():
             land_use_description VARCHAR(255)
             )
         """,
-        """
-        CREATE TABLE dim_parcel (
+        """CREATE TABLE dim_parcel (
             ID SERIAL PRIMARY KEY,
             PARCEL_ID VARCHAR(11),
             TAX_MAP_ID VARCHAR(14),
             PROPERTY_ADDRESS VARCHAR(255),
             LAND_USE_TYPE CHAR(1),
             LAND_USE_SUBTYPE VARCHAR(255),
+            legal_description VARCHAR(255),
+            municipality VARCHAR(255),
+            school_district VARCHAR(255),
+            property_type VARCHAR(255),
             LAST_MODIFIED_DATE TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             UNIQUE (PARCEL_ID)
         )
         """,
-        """
-        CREATE TABLE fact_sales (
+        """CREATE TABLE fact_sales (
             ID INT,
             SALES_DATE DATE,
 			SALES_AMOUNT MONEY,
@@ -76,8 +80,7 @@ def create_tables():
 	  	REFERENCES dim_parcel(id)
 	    )
         """,
-        """
-        CREATE TABLE sales_upload_amount_errors (
+        """CREATE TABLE sales_upload_amount_errors (
             parcel_id VARCHAR(255) NOT NULL,
             tax_map_id VARCHAR(255) NOT NULL,
             owner_name VARCHAR(255),
@@ -87,8 +90,7 @@ def create_tables():
             land_use_description VARCHAR(255)
             )
         """,
-        """
-        CREATE TABLE fact_parcel_details (
+        """CREATE TABLE fact_parcel_details (
             ID INT,
             card VARCHAR(255),
 			class VARCHAR(255),
@@ -123,8 +125,7 @@ def create_tables():
 	  		REFERENCES dim_parcel(id)
 	    )
         """,
-        """
-        CREATE TABLE stg_parcel_details (
+        """CREATE TABLE stg_parcel_details (
             parcel_id VARCHAR(255),
             card VARCHAR(255),
 			class VARCHAR(255),
@@ -152,11 +153,28 @@ def create_tables():
 			additional_fixtures int,
 			bed_rooms int,
 			family_room int,
-			living_units int)
+			living_units int)""",
+
+        """CREATE TABLE stg_parcel_site_details (
+            parcel_id VARCHAR(255),
+            site_location VARCHAR(255),
+			legal_description VARCHAR(255),
+			municipality VARCHAR(255),
+			school_district VARCHAR(255),
+			property_type VARCHAR(255)
+			)
+        """,
+        """CREATE TABLE stg_sale_history (
+            parcel_id VARCHAR(255),
+            owner VARCHAR(255),
+			sale_date VARCHAR(255),
+			sale_price VARCHAR(255)
+			)
         """
-        )
+    )
 
     execute_multiple_queries(commands)
+
 
 def create_stored_procedures():
     commands = (
@@ -233,6 +251,7 @@ def create_stored_procedures():
         """)
 
     execute_multiple_queries(commands)
+
 
 if __name__ == '__main__':
     create_database()
