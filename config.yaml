@@ -1,0 +1,6 @@
+# Input postgres connection info for database setup and subsquent sql queries
+DRIVER_PATH:
+  /usr/local/share/chromedriver
+# Change this if pooling keeps crashing (this allows the parcel details scraper to search multiple parcels at once)
+pool:
+  10
