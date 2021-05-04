@@ -9,7 +9,7 @@ import json
 from multiprocessing import Pool, Queue
 import os
 import psycopg2
-from queries import insert_residential_details
+from queries import insert_residential_details, insert_parcel_site_details, get_missing_data
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import NoSuchElementException
@@ -19,6 +19,12 @@ from selenium.webdriver.support import expected_conditions as EC
 from string import ascii_lowercase
 import sys
 import timeit
+import yaml
+
+
+# Read config
+with open('config.yaml', 'r') as stream:
+    data_loaded = yaml.safe_load(stream)
 
 
 class CustomError(Exception):
@@ -54,7 +60,7 @@ def get_selenium_res():
         'user-agent={user_agent}'.format(user_agent=user_agent))
 
     # Add driver path and create driver
-    DRIVER_PATH = '/usr/local/share/chromedriver'
+    DRIVER_PATH = data_loaded.get('DRIVER_PATH')
     return webdriver.Chrome(options=options, executable_path=DRIVER_PATH)
 
 
@@ -86,7 +92,7 @@ def bulk_csv_upload(upload_type):
     cur.close()
 
 
-def sales_history_by_date_range(street_name, start_date=(date.today() - datetime.timedelta(days=365)), end_date=date.today()):
+def get_sales_history_by_date_range(street_name, start_date=(date.today() - datetime.timedelta(days=365)), end_date=date.today()):
     """
     Use the advanced search function of the http://delcorealestate.co.delaware.pa.us/ with the below inputs:
 
@@ -183,7 +189,7 @@ def sales_history_by_date_range(street_name, start_date=(date.today() - datetime
 
 def sales_history_by_year_batch(year_start: int, year_end: int):
     """
-    Runs sales_history_by_date_range for the specified year range
+    Runs get_sales_history_by_date_range for the specified year range
     """
     # Input validation
     if year_start > year_end:
@@ -197,7 +203,7 @@ def sales_history_by_year_batch(year_start: int, year_end: int):
     while i >= year_start:
         for letter in ascii_lowercase:
             try:
-                sales_history_by_date_range(
+                get_sales_history_by_date_range(
                     letter, '{year}-01-01'.format(year=i), '{year}-12-31'.format(year=i))
                 bulk_csv_upload()
             # Occasionally no results will be found (streets starting with X are often a culprit)
@@ -212,28 +218,21 @@ def sales_history_by_year_batch(year_start: int, year_end: int):
         runtime=runtime))
 
 
-def get_parcels_without_detail_data(detail_table):
+def get_parcels_without_detail_data(missing_data_query):
     """
     Query database and find all parcels without detail entries
 
     Args:
-        detail table: input table name
+        missing_data_query (either residential or parcel details)
     """
-    query = (
-        """
-        SELECT P.PARCEL_ID
-        FROM DIM_PARCEL P
-        LEFT JOIN {table} FPD ON FPD.ID = P.ID
-        GROUP BY P.PARCEL_ID
-        HAVING COUNT(FPD.ID) = 0
-        ORDER BY P.PARCEL_ID DESC
-        """.format(table=detail_table))
+    query = get_missing_data[missing_data_query]
     conn = None
     try:
         conn = create_connection()
         cur = conn.cursor()
         cur.execute(query)
         records = [r[0] for r in cur.fetchall()]
+        conn.commit()
         cur.close()
         return records
     except (Exception, psycopg2.DatabaseError) as error:
@@ -272,6 +271,10 @@ def datalet_table_scrape(driver, parcel_id):
 def residential_details_upload(data_dict, exclude):
     """
     Upload residential details to database
+
+    Args:
+        data_dict: a dictionary required for upload
+        exclude: Some entries do not have residential details, this allows us to bypass the scraping
     """
     # Not every entry has residential detail data if it does not insert dummy data into the database to stop from searching again
     if (not data_dict) or list(data_dict.keys())[0] != exclude:
@@ -287,7 +290,8 @@ def residential_details_upload(data_dict, exclude):
             'call sp_populate_dim_parcel_residential_details();']
         [cur.execute(query) for query in populate_queries]
         conn.commit()
-        print('No data available for parcel ' + data_dict['parcel_id'])
+        print('No data available for parcel {parcel_id}'.format(
+            parcel_id=data_dict['parcel_id']))
     else:
         try:
             conn = create_connection()
@@ -336,7 +340,7 @@ def residential_details_upload(data_dict, exclude):
 
 def search_by_parcel_id(parcel_id):
     """
-    Use the parcel id to search parcel details on http://delcorealestate.co.delaware.pa.us/
+    Search parcel details by id on http://delcorealestate.co.delaware.pa.us/
     """
     print('Searching for parcel {parcel_id} details...'.format(
         parcel_id=parcel_id))
@@ -359,80 +363,8 @@ def search_by_parcel_id(parcel_id):
         driver.find_element_by_xpath(search_results_xpath).click()
         print('Multiple parcel id results found, navigating to first entry')
     except:
-        print('Single parcel id returned for ' + parcel_id)
+        print('Single parcel result returned for ' + parcel_id)
     return driver
-
-
-def get_parcel_residential_details(parcel_id):
-    """
-    Scrape residential details from the results of the parcel id search
-    """
-    driver = search_by_parcel_id(parcel_id)
-    residential_xpath = '//*[@id="sidemenu"]/li[2]/a/span'
-
-    # Navigate to residential tab, scrape data, and upload
-    # Finding the element by xpath is necessary here since the links do not have explicit names
-    try:
-        # The website performance can vary, waiting until the link for res details is clickable
-        WebDriverWait(driver, 60).until(EC.element_to_be_clickable(
-            (By.XPATH, residential_xpath))).click()
-        data_dict = datalet_table_scrape(driver, parcel_id)
-        residential_details_upload(data_dict, 'Total OBY Value')
-        driver.quit()
-        print('{parcel_id} Complete!'.format(parcel_id=parcel_id))
-    except:
-        print('Website not loading parcel {parcel_id}'.format(
-            parcel_id=parcel_id))
-
-
-def parcel_site_information_scraper(parcel_id):
-    """
-    Scrape parcel site information from the results of the parcel id search
-    """
-    driver = search_by_parcel_id(parcel_id)
-
-    # Scrape data from parcel table
-    data = driver.find_elements_by_id('Parcel')
-    data_list = []
-    [data_list.append(entry.text) for entry in data]
-
-    # There is inconsistency between the headers, most have semi-colons, this makes them consistent
-    processed_list = data_list[0].replace('School District', 'School District:').replace('Homestead %', 'Homestead %:').replace(
-        'Homestead Approved Year', 'Homestead Approved Year:').replace('\n', ':').split(':')
-    stripped_list = [s.strip() for s in processed_list]
-
-    # Specify field list to group values, handling for blank Datalet headers
-    parcel_detail_fields = [
-        'Site Location',
-        'Legal Description',
-        'Map Number',
-        'Municipality',
-        'School District',
-        'Property Type',
-        'Homestead Status - Next School Bill Cycle',
-        'Homestead Status - Current School Bill Cycle',
-        'Homestead %',
-        'Homestead Approved Year',
-        'Additional Info',
-        "Veteran's Exemption"
-    ]
-    parcel_detail_data = {}
-
-    # Parse the response using the field list to identify headers from values
-    j = 0
-    for i in range(len(parcel_detail_fields)-1):
-        while stripped_list[j+1] not in parcel_detail_fields:
-            if parcel_detail_fields[i] not in parcel_detail_data:
-                parcel_detail_data[parcel_detail_fields[i]
-                                   ] = stripped_list[j+1]
-                json_data = json.dumps(parcel_detail_data, indent=2)
-            else:
-                parcel_detail_data[parcel_detail_fields[i]
-                                   ] = parcel_detail_data[parcel_detail_fields[i]] + ' ' + stripped_list[j+1]
-                json_data = json.dumps(parcel_detail_data, indent=2)
-            j += 1
-        i += 1
-        j += 1
 
 
 def residential_details_upload(data_dict, exclude):
@@ -442,10 +374,6 @@ def residential_details_upload(data_dict, exclude):
 
     truncate = 'TRUNCATE TABLE stg_parcel_residential_details'
     cur.execute(truncate)
-
-    # Add to parcel details table
-
-    # Add to sales table
 
     insert = insert_residential_details.format(
         parcel_id=data_dict['parcel_id'],
@@ -484,19 +412,166 @@ def residential_details_upload(data_dict, exclude):
     conn.commit()
 
 
-def parcel_detail_pooling_scraper(table, detail_function):
+def get_parcel_residential_details(parcel_id):
+    """
+    Scrape residential details from the results of the parcel id search
+    """
+    driver = search_by_parcel_id(parcel_id)
+    residential_xpath = '//*[@id="sidemenu"]/li[2]/a/span'
+
+    # Navigate to residential tab, scrape data, and upload
+    # Finding the element by xpath is necessary here since the links do not have explicit names
+    try:
+        # The website performance can vary, waiting until the link for res details is clickable
+        WebDriverWait(driver, 60).until(EC.element_to_be_clickable(
+            (By.XPATH, residential_xpath))).click()
+        data_dict = datalet_table_scrape(driver, parcel_id)
+        residential_details_upload(data_dict, 'Total OBY Value')
+        driver.quit()
+        print('{parcel_id} Complete!'.format(parcel_id=parcel_id))
+    except:
+        print('Website not loading parcel {parcel_id}'.format(
+            parcel_id=parcel_id))
+
+
+def parcel_site_information_scraper(driver, parcel_id):
+    """
+    Scrape parcel site information from the results of the parcel id search
+    """
+    data = driver.find_elements_by_id('Parcel')
+    data_list = []
+    [data_list.append(entry.text) for entry in data]
+    processed_list = data_list[0].replace('School District', 'School District:').replace('Homestead %', 'Homestead %:').replace(
+        'Homestead Approved Year', 'Homestead Approved Year:').replace('\n', ':').split(':')
+    stripped_list = [s.strip() for s in processed_list]
+
+    parcel_detail_fields = [
+        'Site Location',
+        'Legal Description',
+        'Map Number',
+        'Municipality',
+        'School District',
+        'Property Type',
+        'Homestead Status - Next School Bill Cycle',
+        'Homestead Status - Current School Bill Cycle',
+        'Homestead %',
+        'Homestead Approved Year',
+        'Additional Info',
+        "Veteran's Exemption"
+    ]
+
+    parcel_detail_data = {}
+
+    # Parse element response
+    j = 0
+    for i in range(len(parcel_detail_fields)-1):
+        while stripped_list[j+1] not in parcel_detail_fields:
+            if parcel_detail_fields[i] not in parcel_detail_data:
+                parcel_detail_data[parcel_detail_fields[i]
+                                   ] = stripped_list[j+1]
+            else:
+                parcel_detail_data[parcel_detail_fields[i]
+                                   ] = parcel_detail_data[parcel_detail_fields[i]] + ' ' + stripped_list[j+1]
+            j += 1
+        i += 1
+        j += 1
+
+    table_id = driver.find_element(By.ID, 'Owner History')
+    rows = table_id.find_elements(By.TAG_NAME, 'tr')
+    sale_data = {'owner_history': []}
+
+    for row in rows:
+        elements = row.find_elements(By.TAG_NAME, 'td')[0:]
+        if elements[0].text not in ['Owner', '']:
+            owner = elements[0]
+            sale_date = elements[-2]
+            sale_price = elements[-1]
+
+            dict_data = {
+                'owner': owner.text,
+                'sale_date': sale_date.text,
+                'sale_price': sale_price.text
+            }
+
+            sale_data['owner_history'].append(dict_data)
+
+    driver.close()
+    return parcel_detail_data, sale_data
+
+
+def parcel_site_information_upload(parcel_id, parcel_detail_data, sale_data):
+    conn = create_connection()
+    cur = conn.cursor()
+
+    #'TRUNCATE TABLE stg_parcel_site_details',
+    truncate = ['TRUNCATE TABLE stg_sale_history',
+                'DELETE FROM stg_parcel_site_details sg WHERE parcel_id in (select parcel_id from dim_parcel where municipality is not null)']
+    [cur.execute(query) for query in truncate]
+
+    # Add to parcel details table
+    insert = insert_parcel_site_details.format(
+        parcel_id=parcel_id,
+        site_location=parcel_detail_data['Site Location'].replace(
+            "'", "''"),
+        legal_description=parcel_detail_data['Legal Description'].replace(
+            "'", "''"),
+        municipality=parcel_detail_data['Municipality'],
+        school_district=parcel_detail_data['School District'],
+        property_type=parcel_detail_data['Property Type'],
+    )
+    cur.execute(insert)
+
+    # Add to sales table
+    [cur.execute("""INSERT INTO stg_sale_history(
+        parcel_id,
+        owner,
+        sale_date,
+        sale_price
+        )
+        VALUES (
+            '{parcel_id}',
+            '{owner}',
+            '{sale_date}',
+            '{sale_price}'
+            )
+        """.format(parcel_id=parcel_id,
+                   owner=entry['owner'].replace("'", "''"),
+                   sale_date=entry['sale_date'],
+                   sale_price=entry['sale_price'])
+                 ) for entry in sale_data['owner_history']]
+
+    populate_queries = [
+        'call sp_populate_fact_sales_history();'
+    ]
+    [cur.execute(query) for query in populate_queries]
+    conn.commit()
+
+
+def get_parcel_site_details(parcel_id):
+    """
+    Scrape residential details from the results of the parcel id search
+    """
+    driver = search_by_parcel_id(parcel_id)
+    parcel_detail_data, sale_data = parcel_site_information_scraper(
+        driver, parcel_id)
+    parcel_site_information_upload(parcel_id, parcel_detail_data, sale_data)
+    driver.quit()
+    print('{parcel_id} Complete!'.format(parcel_id=parcel_id))
+
+
+def parcel_detail_pooling_scraper(missing_data_query, detail_function):
     """
     Find and scrape all missing residential details, creating a multiprocess to do multiple searches at one time
     """
     parcel_ids = get_parcels_without_detail_data(
-        table)  # 'dim_parcel_residential_details'
+        missing_data_query)  # 'dim_parcel_residential_details'
 
     if len(parcel_ids) == 0:
         print('All parcel details have been scraped!')
     # Creating a multiprocess since we can only access details for one parcel at a time
     # TODO add a yaml config so the user can specify the number of pools depending on their specs
     q = Queue()
-    p = Pool(5)
+    p = Pool(data_loaded.get('pool'))
     results = p.imap(detail_function, parcel_ids)
     successful = []
     failure_tracker = []
@@ -521,7 +596,7 @@ def parcel_detail_pooling_scraper(table, detail_function):
 
 
 if __name__ == '__main__':
-    # get_parcel_residential_details('36030155001')
+    # get_parcel_site_details('49110311300')
     # parcel_detail_pooling_scraper()
     parcel_detail_pooling_scraper(
-        'dim_parcel_residential_details', get_parcel_residential_details)
+        'parcel_site_details', get_parcel_site_details)
